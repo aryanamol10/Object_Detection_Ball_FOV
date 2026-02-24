@@ -1,1 +1,129 @@
-#New file(make changes)
+from ultralytics import YOLO
+import cv2
+import numpy as np
+
+cap = cv2.VideoCapture(2, cv2.CAP_DSHOW)
+model = YOLO("PyTorch_model.pt")
+
+def calculatedistance(pixels):
+    y=-1.063+(3358)/pixels
+    return y
+def fit_circle_least_squares(points):
+    if points.shape[0]<8:
+        return None
+    pts = points.reshape(-1, 2).astype(np.float64)
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    A = np.column_stack((x, y, np.ones_like(x)))
+    b = -(x*x + y*y)
+
+    #finds the best values of D,E,F with the given A and b values
+    D, E, F = np.linalg.lstsq(A, b, rcond=None)[0]
+
+    cx = -D / 2.0
+    cy = -E / 2.0
+    radiussq=cx*cx + cy*cy - F
+
+    if radiussq <= 0:
+        return None
+    
+    r = np.sqrt(radiussq)
+    if r <= min_radius:
+        return None
+    return cx, cy, r
+
+
+min_radius=8
+
+while True:
+    ret, video = cap.read()
+    if not ret:
+        break
+
+    blurred = cv2.GaussianBlur(video, (11, 11), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+
+    lower_yellow = np.array([18, 70, 60], dtype=np.uint8)
+    upper_yellow = np.array([40, 255, 255], dtype=np.uint8)
+
+    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+    kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=1)
+
+    results = model.predict(source=video, show=False)
+
+    if results:
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0]) 
+                color = (0, 255, 0)
+                # in TESTING:
+                x1 = max(0, x1)
+                y1= max(0, y1)
+                x2= min(video.shape[1], x2)
+                y2 = min(video.shape[0], y2)
+                confidence = box.conf[0]
+                if confidence < .9:
+                    continue
+                # print(confidence, confidence.dtype)
+            # Draw the rectangle (bounding box)
+                cv2.rectangle(video, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(video, f"{confidence:.2f}confidence", (int(x1+10), int(y1+10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+                roi_mask = mask[y1:y2, x1:x2]
+                contours, _ = cv2.findContours(roi_mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.imshow("roi mask", roi_mask)
+                if contours: 
+                    for contour in contours:
+                        contourpoints = contour.copy()
+                        contourpoints[:,0, 0]+=x1
+                        contourpoints[:,0,1]+=y1
+
+                        pts=contourpoints.reshape(-1,2)
+                        data = fit_circle_least_squares(pts)
+
+                        if data is not None:
+                            cx, cy, r = data
+                            center = (int(round(cx)),int(round(cy)))
+                            radius = (int(round(r)))
+
+                            cv2.circle(video, center, radius, (0,255,255), 2)
+                            cv2.circle(video, center, 5, (0,0,255), -1)
+
+                            diameter_pixels=2*radius
+                            diameter_inches=calculatedistance(diameter_pixels)
+                            diameter_ft = diameter_inches/12
+                            cv2.putText(video, f"{diameter_inches:.2f}in", (int(cx+10), int(cy-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+                        else:
+
+                            cluster = np.zeros_like(mask)
+                            cv2.drawContours(cluster, [contourpoints], -1, (255), thickness=-1)
+
+                            dist = cv2.distanceTransform(cluster, cv2.DIST_L2, 5)
+                            dist = cv2.GaussianBlur(dist, (0, 0), 1.0)
+
+                            minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(dist)
+                            if maxVal >= min_radius:
+                                cx, cy = maxLoc
+                                rpixels = float(maxVal)
+                                cv2.circle(video, (cx, cy), int(round(rpixels)), (0, 255, 255), 2)
+                                cv2.circle(video, (cx, cy), 5, (0, 0, 255), -1)
+                                diameter_pixels=2*maxVal
+                                diameter_inches=calculatedistance(diameter_pixels)
+                                diameter_ft = diameter_inches/12
+                                cv2.putText(video, f"{diameter_inches:.2f}in", (cx+10, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+
+                
+            
+
+    # Show result
+    cv2.imshow("Yellow Ball Tracker", video)
+    cv2.imshow("Mask", mask)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
