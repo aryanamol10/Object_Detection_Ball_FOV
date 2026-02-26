@@ -4,6 +4,7 @@ import numpy as np
 
 cap = cv2.VideoCapture(2, cv2.CAP_DSHOW)
 model = YOLO("PyTorch_model.pt")
+#comment check
 
 def calculatedistance(pixels):
     y=-1.063+(3358)/pixels
