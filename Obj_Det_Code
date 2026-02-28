@@ -1,15 +1,19 @@
 from ultralytics import YOLO
+import matplotlib.pyplot as plt
 import cv2
 import numpy as np
+import math
 
 cap = cv2.VideoCapture(2, cv2.CAP_DSHOW)
 model = YOLO("PyTorch_model.pt")
-#comment check
 
 def calculatedistance(pixels):
     y=-1.063+(3358)/pixels
     return y
-def fit_circle_least_squares(points):
+def fit_circle_least_squares(points, onlyxs):
+
+    data = []
+
     if points.shape[0]<8:
         return None
     pts = points.reshape(-1, 2).astype(np.float64)
@@ -31,11 +35,52 @@ def fit_circle_least_squares(points):
     
     r = np.sqrt(radiussq)
     if r <= min_radius:
+        data = [0,0]
         return None
+
+    data.append(cx)
+    data.append(cy)
+    print(data)
+    if onlyxs:
+        return data
     return cx, cy, r
 
+def map_points(data):
+    #Distance between camera for width check
+
+    D = 1.05
+    IMG_HEIGHT = 720
+    IMG_WIDTH = 1280
+    BALL_RADIUS = 0.075057
+    CAM_HEIGHT = 1.44117647059
+
+    FOV_H = 92.1
+    FOV_RADIANS_H = math.radians(FOV_H)
+    FOV_V = 60.6
+    FOV_RADIANS_V = math.radians(FOV_V)
+
+    FOVpixel = (IMG_WIDTH/2)/math.tan(FOV_RADIANS_H/2)
+
+
+    thetay = ((IMG_HEIGHT/2) - float(data[0]))  * (FOV_RADIANS_V/IMG_HEIGHT)
+    thetax = (float(data[1]) -(IMG_WIDTH/2) )  * (FOV_RADIANS_H/IMG_WIDTH)
+
+    dforward = ((CAM_HEIGHT - BALL_RADIUS)/math.tan(0+thetay))
+
+    dside = dforward * math.tan(thetax)
+
+    return dside, dforward
 
 min_radius=8
+
+
+plt.ion() 
+fig, ax = plt.subplots()
+scat = ax.scatter([], []) 
+ax.set_xlim(-5, 5) 
+ax.set_ylim(0, 10)
+ax.set_xlabel("Side Distance (m)")
+ax.set_ylabel("Forward Distance (m)")
 
 while True:
     ret, video = cap.read()
@@ -52,6 +97,19 @@ while True:
     kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.dilate(mask, None, iterations=1)
+    #ADJUST
+
+    ax.set_xlabel("Side Distance (m)")
+    ax.set_ylabel("Forward Distance (m)")
+
+# Enable autoscale 
+    ax.set_autoscalex_on(True)
+    ax.set_autoscaley_on(True)
+
+    plt.draw()
+    plt.pause(0.01)
+
+        
 
     results = model.predict(source=video, show=False)
 
@@ -83,7 +141,19 @@ while True:
                         contourpoints[:,0,1]+=y1
 
                         pts=contourpoints.reshape(-1,2)
-                        data = fit_circle_least_squares(pts)
+                        #ADJUST
+                        data = fit_circle_least_squares(pts, False)
+
+                        data_value_c = fit_circle_least_squares(pts, True)
+
+                        if data_value_c is not None:
+
+                            d_side, d_forward = map_points(data_value_c)
+
+                            scat.set_offsets([[d_side, d_forward]])
+                        else:
+                            print("not enough data")
+                            continue
 
                         if data is not None:
                             cx, cy, r = data
@@ -100,7 +170,8 @@ while True:
                         else:
 
                             cluster = np.zeros_like(mask)
-                            cv2.drawContours(cluster, [contourpoints], -1, (255), thickness=-1)
+                            if cv2.contourArea(contour) > 500:
+                                cv2.drawContours(cluster, [contourpoints], -1, (255), thickness=-1)
 
                             dist = cv2.distanceTransform(cluster, cv2.DIST_L2, 5)
                             dist = cv2.GaussianBlur(dist, (0, 0), 1.0)

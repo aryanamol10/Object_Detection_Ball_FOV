@@ -3,6 +3,10 @@ import numpy as np
 
 cap = cv2.VideoCapture(2, cv2.CAP_DSHOW)
 
+
+#def graph_mapped_function():
+    #Still need to figure out
+     
 while True:
     ret, video = cap.read()
     if not ret:
