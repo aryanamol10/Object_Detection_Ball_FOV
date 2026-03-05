@@ -4,167 +4,378 @@ import math
 import json
 import threading
 from collections import deque
+from sklearn.cluster import DBSCAN
 
-# --- SETTINGS ---
+# --- 2026 FIELD & UI SETTINGS ---
 IMG_WIDTH, IMG_HEIGHT = 640, 480
-MAP_SIZE = 600
-FIELD_METERS_V = 10
-FIELD_METERS_H = 8
-CLUSTER_THRESHOLD = 0.5  # Meters
-SMOOTHING_FRAMES = 3
+FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
+UI_SCALE = 45                  # Adjusted for better visual fit
+PROCESS_EVERY_N_FRAMES = 1
 
-# 2026 Fuel Color (Yellow)
-HSV_LOWER = np.array([15, 80, 80])  # Slightly wider range to catch balls in shadows
-HSV_UPPER = np.array([45, 255, 255])  
+# 2026 Fuel colour (yellow)
+HSV_LOWER = np.array([18, 85, 85])
+HSV_UPPER = np.array([42, 255, 255])
 
-BALL_R_METERS = 0.075057 
-CAM_H = 1.441176         
+BALL_R_METERS = 0.075057
+CAM_H = 1.441176                # not used any more
 
-try:
-    with open('intrinsics.json', 'r') as f:
-        calib_data = json.load(f)
-    intrinsics = np.array(calib_data['intrinsics']).reshape(3, 3)
-    dist_coeffs = np.array(calib_data['dist_coeffs'])
-except:
-    intrinsics = np.eye(3); dist_coeffs = np.zeros(5)
+# --- TRACKING & CLUSTERING CONSTANTS ---
+MAX_CENTROID_DISTANCE = 0.5  # meters; max distance to match same ball
+MAX_HISTORY_LENGTH = 60      # frames to keep in history
+CLUSTER_EPS = 0.3            # DBSCAN eps in meters
+CLUSTER_MIN_SAMPLES = 3      # min balls in a cluster
 
-CAM_MATRIX, DIST_COEFFS = intrinsics, dist_coeffs
-ball_history = {}
-ball_id_counter = 0
+# ------------------------------------------------------------------
+# camera calibration helpers
+# ------------------------------------------------------------------
+def load_calibration(path='intrinsics.json'):
+    with open(path, 'r') as f:
+        d = json.load(f)
+    K = np.array(d['intrinsics']).reshape(3, 3)
+    dist = np.array(d['dist_coeffs'])
+    extr   = np.array(d['fixed_extrinsics']['data']).reshape(4, 4)
+    
+    # Scale intrinsics for current resolution (assuming original was ~1280x720)
+    scale_x = IMG_WIDTH / 1280.0  # Approximate original width
+    scale_y = IMG_HEIGHT / 720.0  # Approximate original height
+    K_scaled = K.copy()
+    K_scaled[0, 0] *= scale_x  # fx
+    K_scaled[1, 1] *= scale_y  # fy
+    K_scaled[0, 2] *= scale_x  # cx
+    K_scaled[1, 2] *= scale_y  # cy
+    
+    return K_scaled, dist, extr
 
-class VideoStream:
-    def __init__(self, src=0):
-        self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, IMG_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, IMG_HEIGHT)
-        self.ret, self.frame = self.cap.read()
-        self.stopped = False
-    def start(self):
-        threading.Thread(target=self.update, daemon=True).start()
-        return self
-    def update(self):
-        while not self.stopped: self.ret, self.frame = self.cap.read()
-    def read(self): return self.frame
-    def stop(self): self.stopped = True; self.cap.release()
+CAM_MATRIX, DIST_COEFFS, EXTRINSIC = load_calibration()
 
-def undistort_frame(frame):
-    return cv2.undistort(frame, CAM_MATRIX, DIST_COEFFS)
+# extrinsic is camera‑to‑world (but camera is ON robot, so this is camera-to-robot)
+R_c2r = EXTRINSIC[0:3, 0:3]
+t_c2r = EXTRINSIC[0:3, 3]
 
-def detect_boxes(mask):
-    """Refined box detection for 2026 Fuel"""
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    detected = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 150: # Lowered threshold to see further balls
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        aspect_ratio = float(w)/h
-        # Loosened filters to prevent missing squished/distant balls
-        if 0.5 < aspect_ratio < 2.0:
-            cx, cy = int(x + w/2), int(y + h/2)
-            detected.append((cx, cy, w, h))
-    return detected
 
-def map_points_fast(cx, cy):
+def pixel_to_world(u, v):
+    """
+    back–project a distorted image point onto the z=0 plane in world
+    coordinates. Pipeline:
+    pixel → camera frame (3D) → robot frame → world frame
+    """
+    # undistort the point and obtain normalised image coords
+    uv = np.array([[[u, v]]], dtype=np.float32)
+    und = cv2.undistortPoints(uv, CAM_MATRIX, DIST_COEFFS)
+    xn, yn = und[0, 0]
+
+    # ray in camera coordinates
+    ray_cam = np.array([xn, yn, 1.0])
+
+    # direction of the ray in robot frame
+    dir_robot = R_c2r.dot(ray_cam)
+
+    # intersection with plane z=0 (ground) in robot frame: 
+    # t_c2r + s*dir_robot has z=0
+    if abs(dir_robot[2]) < 1e-6:
+        return np.array([0.0, 0.0])  # ray parallel to ground
+    
+    s = -t_c2r[2] / dir_robot[2]
+    robot_xy = t_c2r[:2] + s * dir_robot[:2]
+    
+    return robot_xy
+
+
+def world_to_robot(world_pts, robot_pose):
+    """
+    take a list of (x,y) points in the _world_ frame and return
+    coordinates relative to the robot pose so that the old
+    transform_to_field() still works.
+    """
+    rx, ry, r_theta = robot_pose
+    cos_t = math.cos(-r_theta)
+    sin_t = math.sin(-r_theta)
+    rel = []
+    for x, y in world_pts:
+        dx = x - rx
+        dy = y - ry
+        rel.append(np.array([cos_t * dx - sin_t * dy,
+                             sin_t * dx + cos_t * dy]))
+    return rel
+
+
+# --- GEOMETRY UTILS (kept for compatibility) ---
+def get_camera_rel_pose(cx, cy):
+    """
+    deprecated; replaced by pixel_to_world + world_to_robot.
+    left here for compatibility if you want to compare the old and new
+    values.
+    """
     RAD_H, RAD_V = math.radians(92.1), math.radians(60.6)
     thetay = ((IMG_HEIGHT / 2) - cy) * (RAD_V / IMG_HEIGHT)
     thetax = (cx - (IMG_WIDTH / 2)) * (RAD_H / IMG_WIDTH)
     d_forward = (CAM_H - BALL_R_METERS) / math.tan(max(0.05, thetay))
     d_side = d_forward * math.tan(thetax)
-    return d_side, d_forward
+    return np.array([d_forward, -d_side])
 
-def get_clusters(coords):
-    """Simplified custom clustering logic for robotics"""
-    if not coords: return [], []
-    singles, clusters = [], []
-    used = [False] * len(coords)
+
+def transform_to_field(robot_pose, camera_rel_points):
+    """Unchanged from your original code."""
+    if not camera_rel_points: return []
+    rx, ry, r_theta = robot_pose
+    cos_t, sin_t = math.cos(r_theta), math.sin(r_theta)
+    rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+    field_points = []
+    for p in camera_rel_points:
+        global_p = rot.dot(p) + np.array([rx, ry])
+        field_points.append(global_p)
+    return field_points
+
+
+# ------------------------------------------------------------------
+# Ball Tracker Class
+# ------------------------------------------------------------------
+class BallTracker:
+    """Tracks individual balls across frames using centroid matching."""
     
-    for i in range(len(coords)):
-        if used[i]: continue
-        current_group = [coords[i]]
-        used[i] = True
-        for j in range(i + 1, len(coords)):
-            if not used[j]:
-                dist = math.sqrt((coords[i][0]-coords[j][0])**2 + (coords[i][1]-coords[j][1])**2)
-                if dist < CLUSTER_THRESHOLD:
-                    current_group.append(coords[j])
-                    used[j] = True
+    def __init__(self):
+        self.active_balls = {}  # {ball_id: {'centroid': (x,y), 'history': deque, 'age': int}}
+        self.next_id = 0
+        self.frame_count = 0
+    
+    def update(self, detections):
+        """
+        Match new detections to existing tracks.
+        detections: list of (x, y) in world coordinates
+        Returns: list of {id, centroid, history, age}
+        """
+        self.frame_count += 1
         
-        if len(current_group) > 1:
-            clusters.append(np.mean(current_group, axis=0))
-        else:
-            singles.append(current_group[0])
-    return singles, clusters
+        if not self.active_balls:
+            # Initialize new balls
+            for det in detections:
+                self.active_balls[self.next_id] = {
+                    'centroid': det,
+                    'history': deque(maxlen=MAX_HISTORY_LENGTH),
+                    'age': 0
+                }
+                self.active_balls[self.next_id]['history'].append(det)
+                self.next_id += 1
+            return list(self.active_balls.values())
+        
+        # Match detections to existing balls using greedy nearest-neighbor
+        used_detections = set()
+        used_balls = set()
+        
+        for ball_id, ball_data in self.active_balls.items():
+            curr_centroid = ball_data['centroid']
+            best_det_idx = -1
+            best_dist = MAX_CENTROID_DISTANCE
+            
+            for det_idx, det in enumerate(detections):
+                if det_idx in used_detections:
+                    continue
+                dist = np.linalg.norm(np.array(curr_centroid) - np.array(det))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_det_idx = det_idx
+            
+            if best_det_idx >= 0:
+                # Match found
+                detections[best_det_idx]  # Update centroid
+                self.active_balls[ball_id]['centroid'] = detections[best_det_idx]
+                self.active_balls[ball_id]['history'].append(detections[best_det_idx])
+                self.active_balls[ball_id]['age'] += 1
+                used_detections.add(best_det_idx)
+                used_balls.add(ball_id)
+            else:
+                # No match; mark for removal if too old
+                if self.active_balls[ball_id]['age'] > 10:
+                    self.active_balls[ball_id]['age'] -= 1
+        
+        # Remove dead tracks
+        dead_ids = [bid for bid, bdata in self.active_balls.items() 
+                    if bdata['age'] < 0]
+        for bid in dead_ids:
+            del self.active_balls[bid]
+        
+        # Create new tracks for unmatched detections
+        for det_idx, det in enumerate(detections):
+            if det_idx not in used_detections:
+                self.active_balls[self.next_id] = {
+                    'centroid': det,
+                    'history': deque(maxlen=MAX_HISTORY_LENGTH),
+                    'age': 0
+                }
+                self.active_balls[self.next_id]['history'].append(det)
+                self.next_id += 1
+        
+        return list(self.active_balls.values())
 
-def draw_field_map(singles, clusters):
-    map_img = np.zeros((MAP_SIZE, MAP_SIZE, 3), dtype=np.uint8)
-    # Grid lines
-    for i in range(1, 6):
-        y = MAP_SIZE - int((i*2 / FIELD_METERS_V) * MAP_SIZE)
-        cv2.line(map_img, (0, y), (MAP_SIZE, y), (50, 50, 50), 1)
-    # Singles (Yellow circles)
-    for s in singles:
-        mx = int((s[0] + FIELD_METERS_H/2) / FIELD_METERS_H * MAP_SIZE)
-        my = MAP_SIZE - int((s[1] / FIELD_METERS_V) * MAP_SIZE)
-        if 0 <= mx < MAP_SIZE and 0 <= my < MAP_SIZE:
-            cv2.circle(map_img, (mx, my), 6, (0, 255, 255), -1)
-    # Clusters (Purple markers)
-    for c in clusters:
-        mx = int((c[0] + FIELD_METERS_H/2) / FIELD_METERS_H * MAP_SIZE)
-        my = MAP_SIZE - int((c[1] / FIELD_METERS_V) * MAP_SIZE)
-        if 0 <= mx < MAP_SIZE and 0 <= my < MAP_SIZE:
-            cv2.drawMarker(map_img, (mx, my), (255, 0, 255), cv2.MARKER_TRIANGLE_UP, 15, 2)
-    return map_img
 
-# --- EXECUTION ---
-vs = VideoStream(2).start()
+# --------------------------------------------------
+# Cluster Detection
+# --------------------------------------------------
+def detect_ball_clusters(ball_poses):
+    """
+    Cluster ball detections using DBSCAN.
+    Returns: list of cluster labels for each ball
+    """
+    if len(ball_poses) < CLUSTER_MIN_SAMPLES:
+        return np.array([-1] * len(ball_poses))
+    
+    ball_array = np.array(ball_poses)
+    clustering = DBSCAN(eps=CLUSTER_EPS, min_samples=CLUSTER_MIN_SAMPLES).fit(ball_array)
+    return clustering.labels_
+
+
+# --------------------------------------------------
+# Updated Field Mapper with Trails & Clusters
+# --------------------------------------------------
+class FieldMapper:
+    def __init__(self):
+        self.w = int(FIELD_X_METERS * UI_SCALE)
+        self.h = int(FIELD_Y_METERS * UI_SCALE)
+        self.base_map = np.zeros((self.h, self.w, 3), dtype=np.uint8)
+        self._draw_static_elements()
+    
+    def _draw_static_elements(self):
+        cv2.rectangle(self.base_map, (0, 0), (self.w//2, self.h),
+                      (50, 20, 20), -1)
+        cv2.rectangle(self.base_map, (self.w//2, 0), (self.w, self.h),
+                      (20, 20, 50), -1)
+        cv2.line(self.base_map, (self.w//2, 0), (self.w//2, self.h),
+                 (200, 200, 200), 2)
+        for x in range(0, int(FIELD_X_METERS), 2):
+            cv2.line(self.base_map, (x*UI_SCALE, 0),
+                     (x*UI_SCALE, self.h), (70, 70, 70), 1)
+    
+    def render(self, robot_pose, tracked_balls, cluster_labels):
+        """
+        Render field with robot, tracked balls, trails, and clusters.
+        
+        tracked_balls: list of ball track dicts from BallTracker (robot-relative)
+        cluster_labels: array of cluster IDs from DBSCAN
+        Robot pose is used to transform robot-relative coords to world coords
+        """
+        m = self.base_map.copy()
+        rx, ry, theta = robot_pose
+        px = int(rx * UI_SCALE)
+        py = self.h - int(ry * UI_SCALE)
+        cv2.circle(m, (px, py), 12, (0, 255, 0), -1)
+        hx = int(px + 25 * math.cos(theta))
+        hy = self.h - int((ry + 25 * math.sin(theta)) * UI_SCALE)
+        cv2.line(m, (px, py), (hx, hy), (255, 255, 255), 2)
+        
+        # Color map for clusters
+        cluster_colors = {
+            -1: (100, 100, 100),  # Noise (gray)
+            0: (0, 255, 255),     # Yellow
+            1: (255, 0, 255),     # Magenta
+            2: (255, 255, 0),     # Cyan
+            3: (0, 255, 0),       # Green
+        }
+        
+        for idx, ball_data in enumerate(tracked_balls):
+            # Get robot-relative centroid
+            centroid = ball_data['centroid']
+            history = ball_data['history']
+            
+            # Transform to world coordinates
+            world_centroid = transform_to_field(robot_pose, [centroid])[0]
+            world_history = transform_to_field(robot_pose, list(history))
+            
+            cluster_id = cluster_labels[idx] if idx < len(cluster_labels) else -1
+            color = cluster_colors.get(cluster_id, (200, 200, 200))
+            
+            # Draw trail in world coordinates
+            if len(world_history) > 1:
+                for i in range(len(world_history) - 1):
+                    pt1 = world_history[i]
+                    pt2 = world_history[i + 1]
+                    x1 = int(pt1[0] * UI_SCALE)
+                    y1 = self.h - int(pt1[1] * UI_SCALE)
+                    x2 = int(pt2[0] * UI_SCALE)
+                    y2 = self.h - int(pt2[1] * UI_SCALE)
+                    alpha = (i + 1) / len(world_history)  # Fade effect
+                    fade_color = tuple(int(c * alpha) for c in color)
+                    if 0 <= x1 < self.w and 0 <= y1 < self.h and 0 <= x2 < self.w and 0 <= y2 < self.h:
+                        cv2.line(m, (x1, y1), (x2, y2), fade_color, 1)
+            
+            # Draw current centroid in world coordinates
+            mx = int(world_centroid[0] * UI_SCALE)
+            my = self.h - int(world_centroid[1] * UI_SCALE)
+            if 0 <= mx < self.w and 0 <= my < self.h:
+                cv2.circle(m, (mx, my), 8, color, -1)
+                cv2.circle(m, (mx, my), 8, (255, 255, 255), 1)
+        
+        return m
+
+
+# --- MAIN ---
+cap = cv2.VideoCapture(1)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, IMG_WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, IMG_HEIGHT)
+mapper = FieldMapper()
+tracker = BallTracker()
+
+current_robot_pose = (0.5, 7.5, 0.0)
+frame_idx = 0
+
 while True:
-    frame = vs.read()
-    if frame is None: continue
-
-    frame_corrected = undistort_frame(frame)
-    hsv = cv2.cvtColor(frame_corrected, cv2.COLOR_BGR2HSV)
+    ret, frame = cap.read()
+    if not ret:
+        continue
+    
+    frame_idx += 1
+    if frame_idx % PROCESS_EVERY_N_FRAMES != 0:
+        cv2.imshow("Blue Alliance Feed", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue
+    
+    frame = cv2.undistort(frame, CAM_MATRIX, DIST_COEFFS)
+    
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            np.ones((5, 5), np.uint8))
+    contours, _ = cv2.findContours(mask,
+                                   cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
     
-    # Dilation helps connect fragmented ball parts
-    mask = cv2.dilate(mask, np.ones((3,3), np.uint8), iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
-
-    boxes = detect_boxes(mask)
-    frame_coords = []
+    world_ball_coords = []
     
-    for cx, cy, w, h in boxes:
-        side, forward = map_points_fast(cx, cy)
+    for cnt in contours:
+        if cv2.contourArea(cnt) < 150:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        cx, cy = x + w // 2, y + h // 2
         
-        # ID tracking
-        best_id, min_dist = None, 0.8
-        for tid, hist in ball_history.items():
-            if hist:
-                d = math.sqrt((side-hist[-1][0])**2 + (forward-hist[-1][1])**2)
-                if d < min_dist: min_dist, best_id = d, tid
+        # pixel_to_world now returns robot-relative coords directly
+        robot_xy = pixel_to_world(cx, cy)
+        world_ball_coords.append(robot_xy)
         
-        if best_id is None:
-            best_id = ball_id_counter; ball_id_counter += 1
-            ball_history[best_id] = deque(maxlen=SMOOTHING_FRAMES)
-        
-        ball_history[best_id].append((side, forward))
-        avg_s = sum(p[0] for p in ball_history[best_id]) / len(ball_history[best_id])
-        avg_f = sum(p[1] for p in ball_history[best_id]) / len(ball_history[best_id])
-        frame_coords.append([avg_s, avg_f])
-        
-        cv2.rectangle(frame_corrected, (cx-w//2, cy-h//2), (cx+w//2, cy+h//2), (0, 255, 0), 2)
+        cv2.rectangle(frame, (x, y), (x + w, y + h),
+                      (0, 255, 0), 2)
+    
+    # Update tracker with new detections (already in robot frame)
+    tracked_balls = tracker.update(world_ball_coords)
+    
+    # Detect clusters in current ball positions
+    current_centroids = [b['centroid'] for b in tracked_balls]
+    cluster_labels = detect_ball_clusters(current_centroids)
+    
+    # Render field map with trails and clusters
+    field_ui = mapper.render(current_robot_pose, tracked_balls, cluster_labels)
+    
+    # Add stats text
+    cv2.putText(field_ui, f"Tracked: {len(tracked_balls)}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+    cv2.putText(field_ui, f"Clusters: {n_clusters}", (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
+    cv2.imshow("Blue Alliance Feed", frame)
+    cv2.imshow("2026 REBUILT Map (Top Down)", field_ui)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-    # Manual cleanup of dead IDs
-    if len(ball_history) > 30:
-        ball_history = {k: v for k, v in list(ball_history.items())[-15:]}
-
-    # Clustering
-    singles, clusters = get_clusters(frame_coords)
-    field_map = draw_field_map(singles, clusters)
-
-    cv2.imshow("2026 Fuel Detection", frame_corrected)
-    cv2.imshow("Field Map", field_map)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'): break
-vs.stop(); cv2.destroyAllWindows()
+cap.release()
+cv2.destroyAllWindows()
