@@ -1,66 +1,58 @@
 import cv2
 import numpy as np
 import math
-import json
 from networktables import NetworkTables
 
-# --- PHYSICAL CALIBRATION (Adjust these to your actual robot) ---
-CAM_HEIGHT = 1.441176      # Meters from floor to camera lens
-CAM_TILT_DOWN = 35.0       # Degrees the camera is tilted DOWN from horizontal
-FOV_VERTICAL = 60.6        # Vertical Field of View (from camera spec)
-FOV_HORIZONTAL = 92.1      # Horizontal Field of View (from camera spec)
+# --- CALIBRATION (Double check these!) ---
+CAM_HEIGHT = 1.441176      
+CAM_TILT_DOWN = 35.0       # Degrees angled down from horizontal
+FOV_VERTICAL = 60.6        
+FOV_HORIZONTAL = 92.1      
 
-# --- 2026 FIELD SETTINGS ---
-TEAM_NUMBER = 1234         # Your FRC Team Number
+# --- SYSTEM CONFIG ---
+TEAM_NUMBER = 1234
 IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 
-# Ball Physics
-BALL_DIAMETER = 0.15 
-STACK_HEIGHT_8 = BALL_DIAMETER * 8
+# Set to -1 if far/near is still flipped
+FINAL_INVERSION_MULTIPLIER = 1 
 
-# NetworkTables Initialization
+# NetworkTables
 NetworkTables.initialize(server=f'10.{TEAM_NUMBER//100}.{TEAM_NUMBER%100}.2')
 sd = NetworkTables.getTable("SmartDashboard")
 
-# ------------------------------------------------------------------
-# Core Math: Pixel to World Pose
-# ------------------------------------------------------------------
 def get_world_pose(u, v, robot_pose, target_z=0.0):
-    """
-    Direct Trigonometry Projection to prevent Near/Far inversion.
-    robot_pose: (x, y, heading_radians)
-    """
     rx, ry, r_theta = robot_pose
     
-    # 1. Calculate Vertical Angle
-    # Center of image is 0. Bottom is +1, Top is -1.
+    # 1. VERTICAL ANGLE CALCULATION
+    # ny: -1.0 at top of screen, 0 at center, 1.0 at bottom
     ny = (v - (IMG_HEIGHT / 2)) / (IMG_HEIGHT / 2)
     
-    # Invert ny so that pixels at the bottom (positive ny) 
-    # increase the total downward angle.
-    pixel_angle_vertical = ny * (FOV_VERTICAL / 2) 
+    # This is the angle offset from the center of the camera lens
+    # We multiply by the inversion fix to force the direction
+    pixel_angle_vertical = ny * (FOV_VERTICAL / 2) * FINAL_INVERSION_MULTIPLIER
     
-    # Total angle from horizontal to the object
+    # Total angle from horizontal to the floor
+    # As v increases (moving down screen), total_angle should increase
     total_angle_rad = math.radians(CAM_TILT_DOWN + pixel_angle_vertical)
     
-    # 2. Calculate Horizontal Angle (Azimuth)
+    # 2. HORIZONTAL ANGLE
     nx = (u - (IMG_WIDTH / 2)) / (IMG_WIDTH / 2)
     pixel_angle_horizontal = nx * (FOV_HORIZONTAL / 2)
     
-    # 3. Solve Triangle for Ground Distance
-    # d = height / tan(angle)
+    # 3. DISTANCE MATH
     h_effective = CAM_HEIGHT - target_z
     
-    # Prevent division by zero or looking above horizon
-    if total_angle_rad <= 0.05: return None 
+    # If the angle is too small, we are looking at the ceiling/horizon
+    if total_angle_rad <= 0.02: return None 
     
+    # Standard Trig: Distance = Height / Tan(Angle)
     d_forward = h_effective / math.tan(total_angle_rad)
     d_side = d_forward * math.tan(math.radians(pixel_angle_horizontal))
     
-    # 4. Rotate by Robot Heading (Transform to World Coordinates)
-    # Robot X+ is forward, Y+ is left
+    # 4. FIELD TRANSFORMATION
+    # Rotate robot-relative (forward, side) to world (X, Y)
     cos_t, sin_t = math.cos(r_theta), math.sin(r_theta)
     
     world_x = rx + (d_forward * cos_t - d_side * sin_t)
@@ -68,91 +60,69 @@ def get_world_pose(u, v, robot_pose, target_z=0.0):
     
     return np.array([world_x, world_y, target_z])
 
-# ------------------------------------------------------------------
-# UI Rendering
-# ------------------------------------------------------------------
 class FieldMapper:
     def __init__(self):
         self.w, self.h = int(FIELD_X_METERS * UI_SCALE), int(FIELD_Y_METERS * UI_SCALE)
         self.base = np.zeros((self.h, self.w, 3), dtype=np.uint8)
-        # Draw Field Borders
-        cv2.rectangle(self.base, (0,0), (self.w, self.h), (50,50,50), 2)
-        # Center Line
-        cv2.line(self.base, (self.w//2, 0), (self.w//2, self.h), (100,100,100), 1)
+        # Alliance Colors
+        cv2.rectangle(self.base, (0, 0), (self.w // 2, self.h), (40, 20, 20), -1)
+        cv2.rectangle(self.base, (self.w // 2, 0), (self.w, self.h), (20, 20, 40), -1)
 
-    def draw(self, robot_pose, balls):
+    def draw(self, robot_pose, detections):
         m = self.base.copy()
         rx, ry, theta = robot_pose
-        # Draw Robot
         px, py = int(rx * UI_SCALE), self.h - int(ry * UI_SCALE)
-        cv2.circle(m, (px, py), 10, (0, 255, 0), -1)
-        # Heading Line
-        hx, hy = int(px + 20*math.cos(theta)), py - int(20*math.sin(theta))
+        
+        # Draw Robot
+        cv2.circle(m, (px, py), 12, (0, 255, 0), -1)
+        hx, hy = int(px + 25*math.cos(theta)), py - int(25*math.sin(theta))
         cv2.line(m, (px, py), (hx, hy), (255, 255, 255), 2)
-        # Draw Balls
-        for b in balls:
+        
+        for b in detections:
             bx, by = int(b[0] * UI_SCALE), self.h - int(b[1] * UI_SCALE)
-            color = (0, 255, 255) if b[2] > 0.1 else (0, 200, 255)
             if 0 <= bx < self.w and 0 <= by < self.h:
-                cv2.circle(m, (bx, by), 5, color, -1)
+                cv2.circle(m, (bx, by), 6, (0, 255, 255), -1)
         return m
 
-# ------------------------------------------------------------------
-# Main Execution
-# ------------------------------------------------------------------
+# --- MAIN ---
 cap = cv2.VideoCapture(1)
 mapper = FieldMapper()
 
-# 2026 Yellow Fuel Color Mask
-LOWER_YELLOW = np.array([18, 85, 85])
-UPPER_YELLOW = np.array([42, 255, 255])
-
 while True:
-    # 1. Live Odometry from NetworkTables
-    # Replace keys with your specific WPILib names
-    robot_pose = (
-        sd.getNumber("RobotX", 2.0), 
-        sd.getNumber("RobotY", 4.0), 
-        math.radians(sd.getNumber("GyroAngle", 0.0))
-    )
-
     ret, frame = cap.read()
     if not ret: break
 
-    # 2. Vision Processing
+    # Get Live Data
+    robot_pose = (sd.getNumber("RobotX", 2.0), sd.getNumber("RobotY", 4.0), math.radians(sd.getNumber("Gyro", 0)))
+
+    # Yellow Mask
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
+    mask = cv2.inRange(hsv, np.array([18, 85, 85]), np.array([42, 255, 255]))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    detections = []
+    current_balls = []
     for cnt in contours:
-        if cv2.contourArea(cnt) < 150: continue
+        if cv2.contourArea(cnt) < 200: continue
         x, y, w, h = cv2.boundingRect(cnt)
         
-        # 3. Logic for Stack vs Ground
-        is_stack = h > (w * 1.6)
-        if is_stack:
-            target_z = STACK_HEIGHT_8
-            u_ref, v_ref = x + w//2, y # Top of stack
-        else:
-            target_z = 0.0
-            u_ref, v_ref = x + w//2, y + h # Bottom of ball
-
-        # Project to world
-        pos = get_world_pose(u_ref, v_ref, robot_pose, target_z)
+        # Point to project
+        u_pix = x + w // 2
+        v_pix = y + h # Bottom of object
         
+        # 8-ball stack check
+        is_stack = h > (w * 1.7)
+        target_z = (0.15 * 8) if is_stack else 0.0
+        if is_stack: v_pix = y # Top of stack
+        
+        pos = get_world_pose(u_pix, v_pix, robot_pose, target_z)
         if pos is not None:
-            detections.append(pos)
-            cv2.rectangle(frame, (x,y), (x+w, y+h), (0, 255, 0), 2)
+            current_balls.append(pos)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    # 4. Update Displays
-    field_map = mapper.draw(robot_pose, detections)
+    ui = mapper.draw(robot_pose, current_balls)
+    cv2.imshow("Cam", frame)
+    cv2.imshow("Map", ui)
     
-    cv2.imshow("Robot Camera Feed", frame)
-    cv2.imshow("Field Map", field_map)
-
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
-cv2.destroyAllWindows()
