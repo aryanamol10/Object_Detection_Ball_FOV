@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 import math
-from networktables import NetworkTables
-from scipy.cluster.hierarchy import fclusterdata
+import socket
+import struct
 from sklearn.cluster import DBSCAN
 
 # --- CALIBRATION ---
@@ -12,7 +12,9 @@ FOV_VERTICAL = 60.6
 FOV_HORIZONTAL = 92.1      
 
 # --- SYSTEM CONFIG ---
-TEAM_NUMBER = 254 
+#Still need to set this
+UDP_IP = "0.0.0.0"  # Listen on all interfaces
+UDP_PORT = 5800     # Standard FRC custom port range
 IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
@@ -23,9 +25,25 @@ EXPECTED_BALL_RADIUS_PX = 35
 REFLECTION_X_LIMIT = 60  
 SATURATION_MIN = 90      
 
-# NetworkTables
-NetworkTables.initialize(server=f'10.{TEAM_NUMBER//100}.{TEAM_NUMBER%100}.2')
-sd = NetworkTables.getTable("SmartDashboard")
+# --- UDP SETUP ---
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((UDP_IP, UDP_PORT))
+sock.setblocking(False) # Don't wait for data; use most recent instead
+
+def get_latest_robot_pose(current_pose):
+    """
+    Attempts to read the latest packet from the UDP buffer.
+    Expected packet format from RoboRIO: 3 doubles (x, y, theta) = 24 bytes.
+    """
+    try:
+        # Read the most recent packet (24 bytes for 3 doubles)
+        data, addr = sock.recvfrom(1024)
+        # Struct 'ddd' unpacks 3 doubles (8 bytes each)
+        x, y, theta_deg = struct.unpack('!ddd', data) 
+        return (x, y, math.radians(theta_deg))
+    except (BlockingIOError, socket.error, struct.error):
+        # No new data, return the previous known pose
+        return current_pose
 
 def get_world_pose(u, v, robot_pose, target_z=0.0):
     rx, ry, r_theta = robot_pose
@@ -95,12 +113,15 @@ class FieldMapper:
 # --- MAIN LOOP ---
 cap = cv2.VideoCapture(1)
 mapper = FieldMapper()
+current_robot_pose = (2.0, 4.0, 0.0) # Start default
 
 while True:
     ret, frame = cap.read()
     if not ret: break
 
-    robot_pose = (sd.getNumber("RobotX", 2.0), sd.getNumber("RobotY", 4.0), math.radians(sd.getNumber("Gyro", 0)))
+    # Update Pose via UDP
+    current_robot_pose = get_latest_robot_pose(current_robot_pose)
+
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([18, 90, 90]), np.array([40, 255, 255]))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
@@ -112,16 +133,14 @@ while True:
         x, y, w, h = cv2.boundingRect(cnt)
         if w * h < 350 or is_reflection(x, y, w, h, hsv): continue
 
-        # Draw the Bounding Box back on the Window
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
         if w > EXPECTED_BALL_RADIUS_PX * 1.6 or h > EXPECTED_BALL_RADIUS_PX * 1.6:
             refined = refine_cluster_points(mask[y:y+h, x:x+w], x, y)
             for pt in refined:
-                pos = get_world_pose(pt[0], pt[1], robot_pose)
+                pos = get_world_pose(pt[0], pt[1], current_robot_pose)
                 if pos is not None: 
                     raw_detections.append(pos)
-                    # Draw sub-points for clusters
                     cv2.circle(frame, (pt[0], pt[1]), 4, (0, 0, 255), -1)
         else:
             M = cv2.moments(mask[y:y+h, x:x+w])
@@ -131,10 +150,9 @@ while True:
                 white_px = np.where(col > 0)[0]
                 if len(white_px) > 0:
                     gx, gy = x + local_u, y + white_px[-1]
-                    pos = get_world_pose(gx, gy, robot_pose)
+                    pos = get_world_pose(gx, gy, current_robot_pose)
                     if pos is not None: 
                         raw_detections.append(pos)
-                        # Draw ground contact point for singles
                         cv2.circle(frame, (gx, gy), 4, (255, 0, 0), -1)
 
     singles, clusters = [], []
@@ -145,9 +163,9 @@ while True:
             if len(group) > 1: clusters.append(np.mean(group, axis=0))
             else: singles.append(group[0])
 
-    ui = mapper.draw(robot_pose, singles, clusters)
-    cv2.imshow("Vision (Green=Box, Red=ClusterPt, Blue=SinglePt)", frame)
-    cv2.imshow("Field Map", ui)
+    ui = mapper.draw(current_robot_pose, singles, clusters)
+    cv2.imshow("Vision", frame)
+    cv2.imshow("Map", ui)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
