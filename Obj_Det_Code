@@ -12,7 +12,7 @@ FOV_VERTICAL = 60.6
 FOV_HORIZONTAL = 92.1      
 
 # --- SYSTEM CONFIG ---
-TEAM_NUMBER = 254 # Updated for your team
+TEAM_NUMBER = 254 
 IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
@@ -20,8 +20,8 @@ UI_SCALE = 45
 # --- HEURISTICS ---
 CLUSTER_THRESHOLD_METERS = 0.4
 EXPECTED_BALL_RADIUS_PX = 35 
-REFLECTION_X_LIMIT = 60  # Ignore detections too close to the left polycarb wall
-SATURATION_MIN = 90      # Filter out dull reflections
+REFLECTION_X_LIMIT = 60  
+SATURATION_MIN = 90      
 
 # NetworkTables
 NetworkTables.initialize(server=f'10.{TEAM_NUMBER//100}.{TEAM_NUMBER%100}.2')
@@ -46,16 +46,12 @@ def get_world_pose(u, v, robot_pose, target_z=0.0):
     return np.array([world_x, world_y])
 
 def is_reflection(x, y, w, h, hsv_frame):
-    # Heuristic 1: Position check (left side polycarb)
     if x < REFLECTION_X_LIMIT: return True
-    # Heuristic 2: Saturation check
     roi_hsv = hsv_frame[y:y+h, x:x+w]
     if np.mean(roi_hsv[:,:,1]) < SATURATION_MIN: return True
     return False
 
 def refine_cluster_points(roi_mask, x_off, y_off):
-    """Uses distance transform to find centers of touching balls."""
-    # 
     dist = cv2.distanceTransform(roi_mask, cv2.DIST_L2, 5)
     _, peaks = cv2.threshold(dist, 0.45 * dist.max(), 255, cv2.THRESH_BINARY)
     peaks = np.uint8(peaks)
@@ -66,18 +62,18 @@ def refine_cluster_points(roi_mask, x_off, y_off):
         M = cv2.moments(sc)
         if M["m00"] > 0:
             local_u = int(M["m10"] / M["m00"])
-            # Scan down for exact ground contact
             col = roi_mask[:, local_u]
-            ground_y = np.where(col > 0)[0][-1]
-            sub_pts.append((x_off + local_u, y_off + ground_y))
+            white_px = np.where(col > 0)[0]
+            if len(white_px) > 0:
+                sub_pts.append((x_off + local_u, y_off + white_px[-1]))
     return sub_pts
 
 class FieldMapper:
     def __init__(self):
         self.w, self.h = int(FIELD_X_METERS * UI_SCALE), int(FIELD_Y_METERS * UI_SCALE)
         self.base = np.zeros((self.h, self.w, 3), dtype=np.uint8)
-        cv2.rectangle(self.base, (0, 0), (self.w // 2, self.h), (35, 20, 20), -1) # Blue
-        cv2.rectangle(self.base, (self.w // 2, 0), (self.w, self.h), (20, 20, 35), -1) # Red
+        cv2.rectangle(self.base, (0, 0), (self.w // 2, self.h), (35, 20, 20), -1) 
+        cv2.rectangle(self.base, (self.w // 2, 0), (self.w, self.h), (20, 20, 35), -1) 
 
     def draw(self, robot_pose, singles, clusters):
         m = self.base.copy()
@@ -116,27 +112,33 @@ while True:
         x, y, w, h = cv2.boundingRect(cnt)
         if w * h < 350 or is_reflection(x, y, w, h, hsv): continue
 
-        # Check if it's a mega-cluster
+        # Draw the Bounding Box back on the Window
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
         if w > EXPECTED_BALL_RADIUS_PX * 1.6 or h > EXPECTED_BALL_RADIUS_PX * 1.6:
             refined = refine_cluster_points(mask[y:y+h, x:x+w], x, y)
             for pt in refined:
                 pos = get_world_pose(pt[0], pt[1], robot_pose)
-                if pos is not None: raw_detections.append(pos)
+                if pos is not None: 
+                    raw_detections.append(pos)
+                    # Draw sub-points for clusters
+                    cv2.circle(frame, (pt[0], pt[1]), 4, (0, 0, 255), -1)
         else:
-            # Single ball: find center and bottom pixel
             M = cv2.moments(mask[y:y+h, x:x+w])
             if M["m00"] > 0:
                 local_u = int(M["m10"] / M["m00"])
                 col = mask[y:y+h, x + local_u]
                 white_px = np.where(col > 0)[0]
                 if len(white_px) > 0:
-                    pos = get_world_pose(x + local_u, y + white_px[-1], robot_pose)
-                    if pos is not None: raw_detections.append(pos)
+                    gx, gy = x + local_u, y + white_px[-1]
+                    pos = get_world_pose(gx, gy, robot_pose)
+                    if pos is not None: 
+                        raw_detections.append(pos)
+                        # Draw ground contact point for singles
+                        cv2.circle(frame, (gx, gy), 4, (255, 0, 0), -1)
 
-    # World-Space Clustering
     singles, clusters = [], []
     if len(raw_detections) > 0:
-        # 
         db = DBSCAN(eps=0.35, min_samples=1).fit(raw_detections)
         for label in set(db.labels_):
             group = np.array(raw_detections)[db.labels_ == label]
@@ -144,8 +146,8 @@ while True:
             else: singles.append(group[0])
 
     ui = mapper.draw(robot_pose, singles, clusters)
-    cv2.imshow("Vision", frame)
-    cv2.imshow("Map", ui)
+    cv2.imshow("Vision (Green=Box, Red=ClusterPt, Blue=SinglePt)", frame)
+    cv2.imshow("Field Map", ui)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
