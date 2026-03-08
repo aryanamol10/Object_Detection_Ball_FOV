@@ -3,6 +3,7 @@ import numpy as np
 import math
 import socket
 import struct
+import time
 import threading
 from networktables import NetworkTables
 from sklearn.cluster import DBSCAN
@@ -20,8 +21,21 @@ FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 CONFIDENCE_THRESHOLD = 0.45
 
-NetworkTables.initialize(server=f'10.99.72.2')
+NetworkTables.initialize(server='10.99.72.2')
+def connect():
+    NetworkTables.initialize(server='10.99.72.2')
+    # Wait for connection to avoid getting default values immediately
+    for i in range(20):
+        if NetworkTables.isConnected():
+            print(f"Connected to NT after {i*0.1:.1f}s")
+            return True
+        time.sleep(0.1)
+    return False
+
+#Initial call for specified network table
+connect()
 sd = NetworkTables.getTable("SmartDashboard")
+
 
 def get_world_pose(u, v, robot_pose, target_z=0.0):
     rx, ry, r_theta = robot_pose
@@ -74,6 +88,8 @@ def refine_cluster_points(roi_mask, x_off, y_off):
             if len(white_px) > 0: sub_pts.append((x_off + lu, y_off + white_px[-1]))
     return sub_pts
 
+
+#Basically creating identical field scenario(to map)
 class FieldMapper:
     def __init__(self):
         self.w, self.h = int(FIELD_X_METERS * UI_SCALE), int(FIELD_Y_METERS * UI_SCALE)
@@ -101,14 +117,28 @@ class FieldMapper:
 # --- MAIN ---
 cap = cv2.VideoCapture(1)
 mapper = FieldMapper()
-current_robot_pose = (2.0, 4.0, 0.0)
 
 while True:
     ret, frame = cap.read()
     if not ret: break
 
-    robot_pose = (sd.getNumber("RobotX", 2.0), sd.getNumber("RobotY", 4.0), math.radians(sd.getNumber("Gyro", 0)))
-    
+    #Robot pose called through network tables from IP
+    if not NetworkTables.isConnected():
+        print("WARNING! Could not connect")
+        pass
+
+    # default value for testing
+    rx = sd.getNumber("RobotX", -1.0)
+    ry = sd.getNumber("RobotY", -1.0)
+    heading = sd.getNumber("Gyro", 0.0)
+
+    if rx == -1.0:
+        #data not received
+        robot_pose = (2.0, 4.0, 0.0) 
+    else:
+        #Data received
+        robot_pose = (rx, ry, math.radians(heading))
+
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([18, 90, 90]), np.array([40, 255, 255]))
     
