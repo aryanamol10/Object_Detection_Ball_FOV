@@ -88,7 +88,10 @@ def calculate_confidence(cnt, x, y, w, h, hsv_roi, world_pos):
     score = (circularity * 0.4) + (avg_sat * 0.4) + (on_field * 0.2)
     return score
 
-# --- VISION LOGIC ---
+"CLUSTER LOGIC"
+"Responsible for ensuring accurate and optimal detection of multiple balls"
+"in one area. We can do this through taking the found detection/window and running a"
+"spatial difference check to see how close balls are"
 def refine_cluster_points(roi_mask, x_off, y_off):
     dist = cv2.distanceTransform(roi_mask, cv2.DIST_L2, 5)
     _, peaks = cv2.threshold(dist, 0.45 * dist.max(), 255, cv2.THRESH_BINARY)
