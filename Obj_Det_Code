@@ -39,6 +39,12 @@ connect()
 ak_table = NetworkTables.getTable("AdvantageKit/RealOutputs/Drive/Viz")
 
 
+"""
+Calculates the ball poses into a 2d plane from the 3d picture it receives
+in the camera. Uses focal point calibration and trig functions to create linear
+paths for direction/distance understanding(NOTE: In order to do this, you must
+undistory image as well)
+"""
 def get_world_pose(u, v, robot_pose, target_z=0.0):
     rx, ry, r_theta = robot_pose
     nx = (u - (IMG_WIDTH / 2)) / (IMG_WIDTH / 2)
