@@ -36,7 +36,7 @@ def connect():
 
 connect()
 # Ensure the path matches AdvantageKit's structure exactly
-ak_table = NetworkTables.getTable("SmartDashboard/RealOutputs/Vision/Pose")
+ak_table = NetworkTables.getTable("AdvantageKit/RealOutputs/Drive/Viz")
 
 
 def get_world_pose(u, v, robot_pose, target_z=0.0):
