@@ -64,6 +64,12 @@ def get_world_pose(u, v, robot_pose, target_z=0.0):
     return np.array([world_x, world_y])
 
 # --- CONFIDENCE HELPERS ---
+"""
+Probably sticking with this.. gives us a better understanding of what exactly is being
+detected at what level of strength(fixes issue with logging poses of similarly shaped or colored
+objects). We can also apply CONFIDENCE_THRESHOLD to tune how accurate shape/color should be for
+better outputs
+"""
 def calculate_confidence(cnt, x, y, w, h, hsv_roi, world_pos):
     # 1. Circularity Score
     area = cv2.contourArea(cnt)
