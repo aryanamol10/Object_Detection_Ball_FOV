@@ -19,7 +19,7 @@ IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 CONFIDENCE_THRESHOLD = 0.45
-
+NetworkTables.getTable("AdvantageKit/RealOutputs")
 
 
 # Ensure the path matches AdvantageKit's structure exactly
@@ -146,7 +146,7 @@ while True:
             if M["m00"] > 0: points_to_check.append((int(M["m10"]/M["m00"]), y+h))
 
         for pt in points_to_check:
-            pos = get_world_pose(pt[0], pt[1], robot_pose)
+            pos = get_world_pose(pt[0], pt[1])
             if pos is not None:
                 conf = calculate_confidence(cnt, x, y, w, h, hsv[y:y+h, x:x+w], pos)
                 
@@ -165,7 +165,7 @@ while True:
             if len(group) > 1: clusters.append(np.mean(group, axis=0))
             else: singles.append(group[0])
 
-    ui = mapper.draw(robot_pose, singles, clusters)
+    ui = mapper.draw(singles, clusters)
     cv2.imshow("Vision (Green=Box, Red=ClusterPt, Blue=SinglePt)", frame)
     cv2.imshow("Field Map", ui)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
