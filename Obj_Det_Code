@@ -93,6 +93,11 @@ def refine_cluster_points(roi_mask, x_off, y_off):
             if len(white_px) > 0: sub_pts.append((x_off + lu, y_off + white_px[-1]))
     return sub_pts
 
+
+"""
+Needed to send coordinates, like cluster and ball detections, to advantagescope
+just iterating through each value and setting a log/path to send it to
+"""
 def publish_poses_to_nt(name, poses):
     flat_array = []
     for p in poses:
@@ -173,6 +178,8 @@ while True:
             if len(group) > 1: clusters.append(np.mean(group, axis=0))
             else: singles.append(group[0])
 
+    #NOTE: We still need to receive this data on the other end from
+    #Robot codebase(needed in order to get data from Advantagescope)
     publish_poses_to_nt("BallPoses", singles)
     publish_poses_to_nt("ClusterPoses", clusters)
 
