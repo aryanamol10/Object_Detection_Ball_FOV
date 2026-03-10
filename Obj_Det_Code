@@ -19,10 +19,11 @@ IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 CONFIDENCE_THRESHOLD = 0.45
-NetworkTables.getTable("AdvantageKit/RealOutputs")
 
 
-# Ensure the path matches AdvantageKit's structure exactly
+NetworkTables.initialize(server='10.99.74.2')
+net_table = NetworkTables.getTable("AdvantageKit/RealOutputs")
+
 
 
 
@@ -91,6 +92,13 @@ def refine_cluster_points(roi_mask, x_off, y_off):
             white_px = np.where(roi_mask[:, lu] > 0)[0]
             if len(white_px) > 0: sub_pts.append((x_off + lu, y_off + white_px[-1]))
     return sub_pts
+
+def publish_poses_to_nt(name, poses):
+    flat_array = []
+    for p in poses:
+        flat_array.extend([p[0], p[1], 0.0])
+    net_table.putNumberArray(name, flat_array)
+
 
 
 #Basically creating identical field scenario(to map)
@@ -164,6 +172,9 @@ while True:
             group = np.array(raw_detections)[db.labels_ == label]
             if len(group) > 1: clusters.append(np.mean(group, axis=0))
             else: singles.append(group[0])
+
+    publish_poses_to_nt("BallPoses", singles)
+    publish_poses_to_nt("ClusterPoses", clusters)
 
     ui = mapper.draw(singles, clusters)
     cv2.imshow("Vision (Green=Box, Red=ClusterPt, Blue=SinglePt)", frame)
