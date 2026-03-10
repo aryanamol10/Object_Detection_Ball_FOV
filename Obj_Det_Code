@@ -19,10 +19,12 @@ IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 CONFIDENCE_THRESHOLD = 0.45
-net_table = 0
+net_table = NetworkTables.getTable("AdvantageKit/RealOutputs/Vision")
 
 def connect():
     NetworkTables.initialize(server='10.99.74.2')
+
+    
     timestamp = 10
     start_time = time.time()
     if time.time()-start_time>timestamp:
