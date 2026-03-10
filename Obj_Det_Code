@@ -19,24 +19,11 @@ IMG_WIDTH, IMG_HEIGHT = 640, 480
 FIELD_X_METERS, FIELD_Y_METERS = 17.5, 8.2
 UI_SCALE = 45 
 CONFIDENCE_THRESHOLD = 0.45
-NetworkTables.startClientTeam(254)
 
-def connect():
-    # Force it to use the specific IP
-    NetworkTables.initialize(server='10.99.74.2') 
-    
-    print("Connecting to NetworkTables...")
-    for i in range(50): # 5 seconds timeout
-        if NetworkTables.isConnected():
-            print(f"Connected to NT at {NetworkTables.getRemoteAddress()}")
-            return True
-        time.sleep(0.1)
-    print("Connection failed, but continuing...")
-    return False
 
-connect()
+
 # Ensure the path matches AdvantageKit's structure exactly
-ak_table = NetworkTables.getTable("AdvantageKit/RealOutputs/Drive/Viz")
+
 
 
 """
@@ -138,15 +125,7 @@ mapper = FieldMapper()
 while True:
     ret, frame = cap.read()
     if not ret: break
-
-    #Robot pose called through network tables from IP
-    if not NetworkTables.isConnected():
-        pass
-
-    list = ak_table.getNumberArray("Pose", (0,0,0,0,0))
     
-    # Map to your local variables
-    robot_pose = (list[0], list[1], math.radians(list[5]))
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([18, 90, 90]), np.array([40, 255, 255]))
