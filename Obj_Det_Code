@@ -123,6 +123,7 @@ class FieldMapper:
         cv2.rectangle(self.base, (0, 0), (self.w // 2, self.h), (35, 20, 20), -1) 
         cv2.rectangle(self.base, (self.w // 2, 0), (self.w, self.h), (20, 20, 35), -1) 
 
+    #Note how we scale this field based on ball's 2D plane calculations from 3D field poses
     def draw(self, robot_pose, singles, clusters):
         m = self.base.copy()
         rx, ry, theta = robot_pose
@@ -178,6 +179,7 @@ while True:
                     cv2.putText(frame, f"{conf:.2f}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                     cv2.circle(frame, (pt[0], pt[1]), 4, color, -1)
 
+    #Categorizes single ball and cluster poses
     singles, clusters = [], []
     if len(raw_detections) > 0:
         db = DBSCAN(eps=0.35, min_samples=1).fit(raw_detections)
